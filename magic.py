@@ -1,27 +1,40 @@
-#!/usr/bin/env python3.4
+#!/usr/bin/env python3
 
 import asyncio
 
-
-def new_connection(*args):
-    print("New connection")
-    print(args)
-
 @asyncio.coroutine
-def create_server(loop):
-    print(4)
-    con = yield from asyncio.start_unix_server(new_connection, "/tmp/test_con")
-    print(con)
+def handle_echo(reader, writer):
+    data = yield from reader.read(100)
+    message = data.decode()
+    addr = writer.get_extra_info('peername')
+    print("Received %r from %r" % (message, addr))
+
+    print("Send: %r" % message)
+    writer.write(data)
+    yield from writer.drain()
+
+    print("Close the client socket")
+    writer.close()
 
 def main():
-    print(1)
     loop = asyncio.get_event_loop()
-    print(2)
-    result = loop.run_until_complete(create_server(loop))
-    print(3)
-    print(result)
-    loop.run_forever()
+    coro = asyncio.start_unix_server(handle_echo, '/tmp/test_con', loop=loop)
+    server = loop.run_until_complete(coro)
+
+    # Serve requests until CTRL+c is pressed
+    print('Serving on {}'.format(server.sockets[0].getsockname()))
+    try:
+        loop.run_forever()
+    except KeyboardInterrupt:
+        pass
+
+    # Close the server
+    server.close()
+    loop.run_until_complete(server.wait_closed())
+    loop.close()
+
 
 if __name__ == "__main__":
     print("wtf")
     main()
+
