@@ -7,6 +7,115 @@ import zmq
 
 logging.basicConfig()
 log = logging.getLogger(__name__)
+log.setLevel(logging.INFO)
+
+
+class Singleton(type):
+    __instance = None
+
+    def __call__(cls, *args, **kw):
+        if not cls.__instance:
+            cls.__instance = super(Singleton, cls).__call__(*args, **kw)
+        return cls.__instance
+
+class AsyncPoller(metaclass=Singleton):
+    '''
+    Singleton class for monitoring all asyncronous zmq sockets.
+    '''
+    def __init__(self):
+        '''
+        Initialize the instance of poller.
+        '''
+        self._sockets = {}
+        self._poller = zmq.Poller()
+        # use global loop
+        self._loop = asyncio.get_event_loop()
+        self._poll_future = None
+
+    @staticmethod
+    def instance():
+        '''
+        Convenience method for accessing the singleton instance. Mainly serves
+        the purpose of conveying the fact this class is a singleton.
+        '''
+        return AsyncPoller()
+
+    def register(self, aio_socket):
+        '''
+        Registers the async zmq socket with this poller to listen to its events.
+
+        @param aio_socket - socket to listen events on
+        '''
+        if aio_socket.zmq_socket in self._sockets:
+            # socket already registered, ignoring
+            return
+
+        self._sockets[aio_socket.zmq_socket] = aio_socket
+        self._sockets[aio_socket.wake_socket] = aio_socket
+
+        self._poll_future = asyncio.async(self._poll_sockets(), loop=self._loop)
+
+    def unregister(self, aio_socket):
+        '''
+        Removes async zmq socket from polling.
+
+        @param aio_socket - socket to stop listening on
+        '''
+        if aio_socket.zmq_socket not in self._sockets:
+            raise RuntimeError("Unregistering socket that is not being polled.")
+
+        self._poller.unregister(aio_socket.zmq_socket)
+        self._poller.unregister(aio_socket.wake_socket)
+
+        del self._sockets[aio_socket.zmq_socket]
+        del self._sockets[aio_socket.wake_socket]
+
+        if len(self._sockets) < 1 and self._poll_future is not None:
+            self._poll_future.cancel()
+            self._poll_future = None
+
+    @asyncio.coroutine
+    def _get_socket_events(self):
+        '''
+        Returns all socket events for subsequent reading/writing.
+        '''
+        # To cleanly exit reset poll every second
+        poll_timeout = 1000
+        future = self._loop.run_in_executor(None, self._poller.poll, poll_timeout)
+        result = yield from future
+        return result
+
+    @asyncio.coroutine
+    def _poll_sockets(self):
+        '''
+        Polls the zmq sockets for incoming data. If new data is available
+        triggers the callbacks.
+        '''
+        def get_poll_flag(socket, aio_socket):
+            # Only change POLLOUT event for zmq sockets
+            return zmq.POLLIN | (aio_socket.zmq_socket == socket
+                                 and aio_socket.is_sending
+                                 and zmq.POLLOUT)
+
+        def reregister_sockets():
+            for socket, aio_socket in self._sockets.items():
+                self._poller.register(socket, get_poll_flag(socket, aio_socket))
+
+        reregister_sockets()
+
+        events = yield from self._get_socket_events()
+
+        while events:
+            socket, event = events[0]
+            aio_socket = self._sockets[socket]
+            yield from aio_socket.handle_event(socket, event)
+
+            reregister_sockets()
+            events = self._poller.poll(0)
+
+        # Restart polling
+        if len(self._sockets) > 0 and self._poll_future is not None:
+            asyncio.async(self._poll_sockets(), loop=self._loop)
 
 
 class AIOZMQSocket:
@@ -25,7 +134,7 @@ class AIOZMQSocket:
         self._loop = asyncio.get_event_loop() if loop is None else loop
         context = zmq.Context.instance()
 
-        # These sockets will wake up the main poll method 
+        # These sockets will wake up the main poll method
         self._got_send_sock = context.socket(zmq.PAIR)
         self._wait_send_sock = context.socket(zmq.PAIR)
 
@@ -33,12 +142,10 @@ class AIOZMQSocket:
         self._wait_send_sock.connect("inproc://wake")
 
         # Start paying attention to recv events
-        self._poller = zmq.Poller()
-        self._poller.register(self._socket, zmq.POLLIN)
-        self._poller.register(self._wait_send_sock, zmq.POLLIN)
+        self._poller = AsyncPoller.instance()
+        self._poller.register(self)
 
         # As soon as loop starts we need to poll for data
-        asyncio.async(self._poll_socket(), loop=self._loop)
         self._on_send_callback = None
         self._on_recv_callback = None
         self._send_queue = collections.deque()
@@ -49,6 +156,21 @@ class AIOZMQSocket:
         Returns true if this socket is closed, false otherwise.
         '''
         return (self._socket is None)
+
+    @property
+    def zmq_socket(self):
+        '''
+        Return the ZMQ socket this class is using.
+        '''
+        return self._socket
+
+    @property
+    def wake_socket(self):
+        '''
+        Return socket which is used for signaling intent to send a message on
+        this socket.
+        '''
+        return self._wait_send_sock
 
     def on_recv(self, on_recv):
         '''
@@ -68,55 +190,22 @@ class AIOZMQSocket:
         self._on_send_callback = on_send
 
     @asyncio.coroutine
-    def _get_socket_events(self):
-        '''
-        Returns all socket events for subsequent reading/writing.
-        '''
-        future = self._loop.run_in_executor(None, self._poller.poll, 1000)
-        result = yield from future
-        return result
-
-    @asyncio.coroutine
-    def _poll_socket(self):
+    def handle_event(self, socket, event):
         '''
         Polls the zmq socket for incoming data. If new data is available
         triggers the callbacks.
         '''
-        def get_poll_flag():
-            return zmq.POLLIN | (self.is_sending and zmq.POLLOUT)
+        # Data available for reception
+        if event & zmq.POLLIN and socket == self.zmq_socket:
+            self._handle_on_recv()
 
-        self._poller.register(self._socket, get_poll_flag())
+        # Can send and have data to send
+        if (event & zmq.POLLOUT) and self.is_sending:
+            self._handle_on_send()
 
-#        events = self._poller.poll(0)
-        events = yield from self._get_socket_events()
-
-        while events:
-            socket, event = events.pop(0)
-
-            # Data available for reception
-            if event & zmq.POLLIN and socket == self._socket:
-                self._handle_on_recv()
-                if self._socket is None:
-                    # Socket was closed after this call, get out of here
-                    break
-
-            # Can send and have data to send
-            if (event & zmq.POLLOUT) and self.is_sending:
-                self._handle_on_send()
-                if self._socket is None:
-                    # Socket was closed after this call, get out of here
-                    break
-
-            # Flush the waker buffer
-            if event & zmq.POLLIN and socket == self._wait_send_sock:
-                self._wait_send_sock.recv(zmq.NOBLOCK)
-
-            self._poller.register(self._socket, get_poll_flag())
-            events = self._poller.poll(0)
-
-        # Restart polling
-        if not self.is_closed:
-            asyncio.async(self._poll_socket(), loop=self._loop)
+        # Flush the waker buffer
+        if event & zmq.POLLIN and socket == self.wake_socket:
+            self._wait_send_sock.recv(zmq.NOBLOCK)
 
     def _handle_on_send(self):
         '''
@@ -172,8 +261,7 @@ class AIOZMQSocket:
         Closes this socket, and makes it unusable thereafter.
         '''
         if self._socket is not None:
-            # Once poller wakes up, it won't be rescheduled
-            self._wake_up_sender()
+            self._poller.unregister(self)
             self._socket.close()
             self._socket = None
             self._wait_send_sock.close()
