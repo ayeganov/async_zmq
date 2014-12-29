@@ -40,4 +40,4 @@ def publisher():
 
 
 if __name__ == "__main__":
-    main_pub()
+    publisher()
