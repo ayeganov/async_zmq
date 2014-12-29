@@ -1,7 +1,6 @@
 import asyncio
 import collections
 import logging
-import os
 
 import zmq
 
@@ -11,6 +10,9 @@ log.setLevel(logging.INFO)
 
 
 class Singleton(type):
+    '''
+    Metaclass that provides singleton capabilities.
+    '''
     __instance = None
 
     def __call__(cls, *args, **kw):
@@ -92,7 +94,7 @@ class AsyncPoller(metaclass=Singleton):
         triggers the callbacks.
         '''
         def get_poll_flag(socket, aio_socket):
-            # Only change POLLOUT event for zmq sockets
+            ''' Sets poll flags depending on socket state. '''
             return zmq.POLLIN | (aio_socket.zmq_socket == socket
                                  and aio_socket.is_sending
                                  and zmq.POLLOUT)
@@ -155,7 +157,7 @@ class AIOZMQSocket:
         '''
         Returns true if this socket is closed, false otherwise.
         '''
-        return (self._socket is None)
+        return self._socket is None
 
     @property
     def zmq_socket(self):
@@ -218,7 +220,7 @@ class AIOZMQSocket:
 
             self._socket.send_multipart(msg)
         except zmq.ZMQError as e:
-            log.exception("Send error: %s" % zmq.strerror(e.errno))
+            log.exception("Send error: %s", zmq.strerror(e.errno))
 
     def _handle_on_recv(self):
         '''
@@ -231,7 +233,7 @@ class AIOZMQSocket:
                 # state changed since poll event
                 pass
             else:
-                log.exception("Recv error: %s" % zmq.strerror(e.errno))
+                log.exception("Recv error: %s", zmq.strerror(e.errno))
 
         if self._on_recv_callback is not None:
             self._on_recv_callback(msgs)
@@ -303,7 +305,7 @@ class SocketFactory:
         @returns AIOZMQSocket
         '''
         if transport != "ipc" or port is not None:
-            raise NotImplemented("Only IPC transport is currently supported.")
+            raise NotImplementedError("Only IPC transport is currently supported.")
 
         # TODO: Once topics have a clear definition do a lookup of the socket
         # path against definition table
@@ -332,7 +334,7 @@ class SocketFactory:
         @returns AIOZMQSocket
         '''
         if transport != "ipc" or port is not None:
-            raise NotImplemented("Only IPC transport is currently supported.")
+            raise NotImplementedError("Only IPC transport is currently supported.")
 
         # TODO: Once topics have a clear definition do a lookup of the socket
         # path against definition table
@@ -367,7 +369,7 @@ class SocketFactory:
         @returns AIOZMQSocket
         '''
         if transport != "ipc" or port is not None:
-            raise NotImplemented("Only IPC transport is currently supported.")
+            raise NotImplementedError("Only IPC transport is currently supported.")
 
         # TODO: Once topics have a clear definition do a lookup of the socket
         # path against definition table
@@ -402,7 +404,7 @@ class SocketFactory:
         @returns AIOZMQSocket
         '''
         if transport != "ipc" or port is not None:
-            raise NotImplemented("Only IPC transport is currently supported.")
+            raise NotImplementedError("Only IPC transport is currently supported.")
 
         # TODO: Once topics have a clear definition do a lookup of the socket
         # path against definition table
