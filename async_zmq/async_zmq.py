@@ -180,7 +180,13 @@ class AIOZMQSocket:
 
         @param on_recv - function to be invoked to handle received data
         '''
-        self._on_recv_callback = on_recv
+        if asyncio.iscoroutinefunction(on_recv):
+            # Make the decision about coroutine, or regular function here
+            # instead of every time a callback is invoked
+            self._on_recv_callback = lambda msgs: asyncio.async(on_recv(msgs),
+                                                                loop=self._loop)
+        else:
+            self._on_recv_callback = on_recv
 
     def on_send(self, on_send):
         '''
@@ -189,7 +195,13 @@ class AIOZMQSocket:
         @param on_send - function to be invoked when data is being sent on this
                          socket.
         '''
-        self._on_send_callback = on_send
+        if asyncio.iscoroutinefunction(on_send):
+            # Make the decision about coroutine, or regular function here
+            # instead of every time a callback is invoked
+            self._on_send_callback = lambda msgs: asyncio.async(on_send(msgs),
+                                                                loop=self._loop)
+        else:
+            self._on_send_callback = on_send
 
     @asyncio.coroutine
     def handle_event(self, socket, event):
@@ -199,16 +211,17 @@ class AIOZMQSocket:
         '''
         # Data available for reception
         if event & zmq.POLLIN and socket == self.zmq_socket:
-            self._handle_on_recv()
+            yield from self._handle_on_recv()
 
         # Can send and have data to send
         if (event & zmq.POLLOUT) and self.is_sending:
-            self._handle_on_send()
+            yield from self._handle_on_send()
 
         # Flush the waker buffer
         if event & zmq.POLLIN and socket == self.wake_socket:
             self._wait_send_sock.recv(zmq.NOBLOCK)
 
+    @asyncio.coroutine
     def _handle_on_send(self):
         '''
         Hadles the pending message to be sent across this socket.
@@ -222,6 +235,7 @@ class AIOZMQSocket:
         except zmq.ZMQError as e:
             log.exception("Send error: %s", zmq.strerror(e.errno))
 
+    @asyncio.coroutine
     def _handle_on_recv(self):
         '''
         Handles the pending received messages on this socket.
