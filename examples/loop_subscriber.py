@@ -1,16 +1,26 @@
+'''
+An example of usage of the subscriber socket.
+'''
+
 import asyncio
-import functools
 
 import async_zmq
 
-loop = asyncio.get_event_loop()
-def on_recv(socket, msg):
-    print("Received msg:", msg)
+@asyncio.coroutine
+def on_recv(msgs):
+    '''
+    Receiver function.
+    '''
+    print("Received msg:", msgs[0].decode())
 
 def subscriber():
+    '''
+    This is the main function of this program.
+    '''
     try:
+        loop = asyncio.get_event_loop()
         zmq_sock = async_zmq.SocketFactory.sub_socket("blabla", loop=loop)
-        zmq_sock.on_recv(functools.partial(on_recv, zmq_sock))
+        zmq_sock.on_recv(on_recv)
 
         loop.run_forever()
     except (KeyboardInterrupt, SystemExit):
