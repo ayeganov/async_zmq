@@ -4,10 +4,11 @@ import logging
 
 import zmq
 
-logging.basicConfig()
 log = logging.getLogger(__name__)
-log.setLevel(logging.INFO)
 
+
+class AsyncZMQError(Exception):
+    pass
 
 class Singleton(type):
     '''
@@ -69,7 +70,7 @@ class AsyncPoller(metaclass=Singleton):
         @param aio_socket - socket to stop listening on
         '''
         if aio_socket.zmq_socket not in self._sockets:
-            raise RuntimeError("Unregistering socket that is not being polled.")
+            raise AsyncZMQError("Unregistering socket that is not being polled.")
 
         self._poller.unregister(aio_socket.zmq_socket)
         self._poller.unregister(aio_socket.wake_socket)
@@ -87,7 +88,7 @@ class AsyncPoller(metaclass=Singleton):
         Returns all socket events for subsequent reading/writing.
         '''
         # To cleanly exit reset poll every second
-        poll_timeout = 1000
+        poll_timeout = 500
         future = self._loop.run_in_executor(None, self._poller.poll, poll_timeout)
         result = yield from future
         return result
@@ -211,8 +212,10 @@ class AIOZMQSocket:
     @asyncio.coroutine
     def handle_event(self, socket, event):
         '''
-        Polls the zmq socket for incoming data. If new data is available
-        triggers the callbacks.
+        Handles the event on given socket by issuing an apropriate callback.
+
+        @param socket - what socket event was triggered on. (zmq, or wake)
+        @param event - socket event type
         '''
         # Data available for reception
         if event & zmq.POLLIN and socket == self.zmq_socket:
@@ -291,47 +294,84 @@ class AIOZMQSocket:
             self._got_send_sock = None
 
 
+class ZmqAddress:
+    '''
+    Represents a ZMQ address path - abstracts away the transports being used in
+    socket creation.
+    '''
+    def __init__(self, transport="ipc", host=None, topic=None, port=None):
+        '''
+        @param transport - one of "IPC", "INPROC", "TCP"
+        @param host - ip address, or hostname of server to connect to
+        @param topic - socket namepath to be used with "IPC" and "INPROC"
+                       (eg:/tmp/bla)
+        @param port - int port value. To be used with "TCP"
+        '''
+        self._transport = transport.lower()
+        self._host = host
+        self._topic = topic
+        self._port = port
+
+        self._is_ipc = self._transport in ("ipc", "inproc")
+        self._is_tcp = self._transport == "tcp"
+        self._is_pgm = self._transport in ("pgm", "epgm")
+
+        if self._is_pgm:
+            raise AsyncZMQError("Pragmatic general multicast not supported.")
+
+        if self._is_ipc and topic is None:
+            raise AsyncZMQError("'%s' transport requires a topic." % self._transport)
+
+        if self._is_tcp and (port is None or host is None):
+            raise AsyncZMQError("'%s' transport requires a port and a host." % self._transport)
+
+        if not (self._is_ipc | self._is_tcp | self._is_pgm):
+            raise AsyncZMQError("Incorrect transport specified: '%s'" % transport)
+
+    def __repr__(self):
+        '''
+        String representation of the end point.
+        '''
+        if self._is_ipc:
+            name = self._topic.lstrip('/').replace('/', '_')
+            return "{0}://{1}".format(self._transport, name)
+        if self._is_tcp:
+            return "{0}://{1}:{2}".format(self._transport, self._host, self._port)
+
+    @property
+    def address_string(self):
+        '''
+        Returns full zmq socket address string.
+        '''
+        return repr(self)
+
 class SocketFactory:
     '''
     Convenience class for creating different types of zmq sockets.
     '''
-
     @staticmethod
-    def _topic_to_sock_name(transport, topic):
-        '''
-        Converts topic name to system acceptable socket name.
-
-        @param transport - socket transport type
-        @param topic - topic of the socket.
-        @return fully qualified socket path
-        '''
-        name = topic.lstrip('/').replace('/', '_')
-        return "{0}:///tmp/{1}".format(transport, name)
-
-    @staticmethod
-    def pub_socket(topic, on_send=None, transport="ipc", port=None, loop=None):
+    def pub_socket(topic=None, on_send=None, host=None, transport="ipc", port=None, loop=None):
         '''
         Create a publish socket on the specified topic.
 
         @param topic - topic of this socket
-        @param transport - what kind of transport to use for messaging(inproc, ipc, tcp etc)
-        @param loop - loop this socket will belong to. Default is global async loop.
         @param on_send - callback when messages are sent on this socket.
                          It will be called as `on_send([msg1,...,msgN])`
                          Status is either a positive value indicating
                          number of bytes sent, or -1 indicating an error.
+        @param host - hostname, or ip address on which this socket will communicate
+        @param transport - what kind of transport to use for messaging(inproc, ipc, tcp etc)
+        @param loop - loop this socket will belong to. Default is global async loop.
         @param port - port number to connect to
         @returns AIOZMQSocket
         '''
-        if transport != "ipc" or port is not None:
-            raise NotImplementedError("Only IPC transport is currently supported.")
-
         # TODO: Once topics have a clear definition do a lookup of the socket
         # path against definition table
         context = zmq.Context.instance()
         socket = context.socket(zmq.PUB)
-        sock_path = SocketFactory._topic_to_sock_name(transport, topic)
-        socket.bind(sock_path)
+        zmq_address = ZmqAddress(transport=transport, host=host, topic=topic, port=port)
+
+        socket.bind(zmq_address.address_string)
 
         async_sock = AIOZMQSocket(socket, loop=loop)
         async_sock.on_send(on_send)
@@ -339,30 +379,28 @@ class SocketFactory:
         return async_sock
 
     @staticmethod
-    def sub_socket(topic, on_recv=None, transport="ipc", port=None, loop=None):
+    def sub_socket(topic=None, on_recv=None, host=None, transport="ipc", port=None, loop=None):
         '''
         Create a subscriber socket on the specified topic.
 
         @param topic - topic of this socket
-        @param transport - what kind of transport to use for messaging(inproc, ipc, tcp etc)
-        @param loop - loop this socket will belong to. Default is global async loop.
         @param on_recv - callback when messages are received on this socket.
                          It will be called as `on_recv([msg1,...,msgN])`
                          If set to None - no data will be read from this socket.
+        @param host - hostname, or ip address on which this socket will communicate
+        @param transport - what kind of transport to use for messaging(inproc, ipc, tcp etc)
+        @param loop - loop this socket will belong to. Default is global async loop.
         @param port - port number to connect to
         @returns AIOZMQSocket
         '''
-        if transport != "ipc" or port is not None:
-            raise NotImplementedError("Only IPC transport is currently supported.")
-
         # TODO: Once topics have a clear definition do a lookup of the socket
         # path against definition table
         context = zmq.Context.instance()
         socket = context.socket(zmq.SUB)
         socket.setsockopt(zmq.SUBSCRIBE, b'')
 
-        sock_path = SocketFactory._topic_to_sock_name(transport, topic)
-        socket.connect(sock_path)
+        zmq_address = ZmqAddress(transport=transport, host=host, topic=topic, port=port)
+        socket.connect(zmq_address.address_string)
 
         async_sock = AIOZMQSocket(socket, loop=loop)
         async_sock.on_recv(on_recv)
@@ -370,13 +408,11 @@ class SocketFactory:
         return async_sock
 
     @staticmethod
-    def req_socket(topic, on_send=None, on_recv=None, transport="ipc", port=None, loop=None):
+    def req_socket(topic=None, on_send=None, on_recv=None, host=None, transport="ipc", port=None, loop=None):
         '''
         Create a subscriber socket on the specified topic.
 
         @param topic - topic of this socket
-        @param transport - what kind of transport to use for messaging(inproc, ipc, tcp etc)
-        @param loop - loop this socket will belong to. Default is global async loop.
         @param on_send - callback when messages are sent on this socket.
                          It will be called as `on_send([msg1,...,msgN])`
                          Status is either a positive value indicating
@@ -384,19 +420,19 @@ class SocketFactory:
         @param on_recv - callback when messages are received on this socket.
                          It will be called as `on_recv([msg1,...,msgN])`
                          If set to None - no data will be read from this socket.
+        @param host - hostname, or ip address on which this socket will communicate
+        @param transport - what kind of transport to use for messaging(inproc, ipc, tcp etc)
+        @param loop - loop this socket will belong to. Default is global async loop.
         @param port - port number to connect to
         @returns AIOZMQSocket
         '''
-        if transport != "ipc" or port is not None:
-            raise NotImplementedError("Only IPC transport is currently supported.")
-
         # TODO: Once topics have a clear definition do a lookup of the socket
         # path against definition table
         context = zmq.Context.instance()
         socket = context.socket(zmq.REQ)
 
-        sock_path = SocketFactory._topic_to_sock_name(transport, topic)
-        socket.connect(sock_path)
+        zmq_address = ZmqAddress(transport=transport, host=host, topic=topic, port=port)
+        socket.connect(zmq_address.address_string)
 
         async_sock = AIOZMQSocket(socket, loop=loop)
         async_sock.on_send(on_send)
@@ -405,13 +441,11 @@ class SocketFactory:
         return async_sock
 
     @staticmethod
-    def rep_socket(topic, on_send=None, on_recv=None, transport="ipc", port=None, loop=None):
+    def rep_socket(topic=None, on_send=None, on_recv=None, host=None, transport="ipc", port=None, loop=None):
         '''
         Create a subscriber socket on the specified topic.
 
         @param topic - topic of this socket
-        @param transport - what kind of transport to use for messaging(inproc, ipc, tcp etc)
-        @param loop - loop this socket will belong to. Default is global async loop.
         @param on_send - callback when messages are sent on this socket.
                          It will be called as `on_send([msg1,...,msgN])`
                          Status is either a positive value indicating
@@ -419,19 +453,19 @@ class SocketFactory:
         @param on_recv - callback when messages are received on this socket.
                          It will be called as `on_recv([msg1,...,msgN])`
                          If set to None - no data will be read from this socket.
+        @param host - hostname, or ip address on which this socket will communicate
+        @param transport - what kind of transport to use for messaging(inproc, ipc, tcp etc)
+        @param loop - loop this socket will belong to. Default is global async loop.
         @param port - port number to connect to
         @returns AIOZMQSocket
         '''
-        if transport != "ipc" or port is not None:
-            raise NotImplementedError("Only IPC transport is currently supported.")
-
         # TODO: Once topics have a clear definition do a lookup of the socket
         # path against definition table
         context = zmq.Context.instance()
         socket = context.socket(zmq.REP)
 
-        sock_path = SocketFactory._topic_to_sock_name(transport, topic)
-        socket.bind(sock_path)
+        zmq_address = ZmqAddress(transport=transport, host=host, topic=topic, port=port)
+        socket.bind(zmq_address.address_string)
 
         async_sock = AIOZMQSocket(socket, loop=loop)
         async_sock.on_send(on_send)
