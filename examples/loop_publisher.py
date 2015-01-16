@@ -5,6 +5,8 @@ An example of usage of the publisher socket.
 import asyncio
 import time
 
+import pickle
+
 import async_zmq
 
 NUM_MSG = 1000
@@ -17,7 +19,9 @@ def do_publish(sock, loop):
     Continious publisher.
     '''
     global counter
-    sock.send(("%s" % counter).encode())
+    d = {"count":counter}
+    ds = pickle.dumps(d)
+    sock.send(ds)
     if counter < NUM_MSG:
         loop.call_soon(do_publish, sock, loop)
         counter += 1
@@ -27,8 +31,9 @@ def on_send(msgs):
     '''
     Gets called when publisher sends a message.
     '''
-    msg = msgs[-1].decode()
-    if int(msg) >= NUM_MSG:
+    msgd = pickle.loads(msgs[-1])
+    count = msgd['count']
+    if count >= NUM_MSG:
         loop.stop()
 
 
@@ -37,7 +42,9 @@ def publisher():
     This is the main function of this program.
     '''
     try:
-        zmq_sock = async_zmq.SocketFactory.pub_socket("blabla",
+        zmq_sock = async_zmq.SocketFactory.pub_socket(host='*',
+                                                      port=55555,
+                                                      transport="tcp",
                                                       on_send=on_send,
                                                       loop=loop)
         # Sleep a litle to let `bind` take proper effect.  In production
