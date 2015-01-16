@@ -55,6 +55,11 @@ class AsyncPoller(metaclass=Singleton):
         self._sockets[aio_socket.zmq_socket] = aio_socket
         self._sockets[aio_socket.wake_socket] = aio_socket
 
+        if self._poll_future is not None:
+            self._poll_future.cancel()
+            # TODO: Wake up the poller itself after cancellation to avoid
+            # running out of threads in the loop executor
+
         self._poll_future = asyncio.async(self._poll_sockets(), loop=self._loop)
 
     def unregister(self, aio_socket):
