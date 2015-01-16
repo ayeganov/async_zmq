@@ -3,6 +3,7 @@ An example of usage of the subscriber socket.
 '''
 
 import asyncio
+import pickle
 
 import async_zmq
 
@@ -11,7 +12,8 @@ def on_recv(msgs):
     '''
     Receiver function.
     '''
-    print("Received msg:", msgs[0].decode())
+    msg_dict = pickle.loads(msgs[-1])
+    print("Received msg:", msg_dict)
 
 def subscriber():
     '''
@@ -19,7 +21,10 @@ def subscriber():
     '''
     try:
         loop = asyncio.get_event_loop()
-        zmq_sock = async_zmq.SocketFactory.sub_socket("blabla", loop=loop)
+        zmq_sock = async_zmq.SocketFactory.sub_socket(host="localhost",
+                                                      port=55555,
+                                                      transport="tcp",
+                                                      loop=loop)
         zmq_sock.on_recv(on_recv)
 
         loop.run_forever()
