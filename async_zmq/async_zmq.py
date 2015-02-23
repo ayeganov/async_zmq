@@ -113,13 +113,19 @@ class AsyncPoller(metaclass=Singleton):
 
         events = yield from self._get_socket_events()
 
-        while events:
-            socket, event = events[0]
-            aio_socket = self._sockets[socket]
-            yield from aio_socket.handle_event(socket, event)
+        try:
+            while events:
+                socket, event = events[0]
+                aio_socket = self._sockets[socket]
+                yield from aio_socket.handle_event(socket, event)
 
-            reregister_sockets()
-            events = self._poller.poll(0)
+                reregister_sockets()
+                events = self._poller.poll(0)
+        except zmq.ZMQError as e:
+            if e.errno != zmq.EAGAIN:
+                log.exception("Send/recv error")
+        except Exception:
+            log.exception("Unexpected error")
 
         # Restart polling
         if len(self._sockets) > 0 and self._poll_future is not None:
