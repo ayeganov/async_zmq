@@ -146,8 +146,9 @@ class AIOZMQSocket:
         self._got_send_sock = context.socket(zmq.PAIR)
         self._wait_send_sock = context.socket(zmq.PAIR)
 
-        self._got_send_sock.bind("inproc://wake")
-        self._wait_send_sock.connect("inproc://wake")
+        sock_name_noise = str(socket).split()[-1]
+        self._got_send_sock.bind("inproc://wake{0}".format(sock_name_noise))
+        self._wait_send_sock.connect("inproc://wake{0}".format(sock_name_noise))
 
         # Start paying attention to recv events
         self._poller = AsyncPoller.instance()
