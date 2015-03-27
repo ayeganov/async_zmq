@@ -78,9 +78,12 @@ class AsyncPoller(metaclass=Singleton):
         del self._sockets[aio_socket.zmq_socket]
         del self._sockets[aio_socket.wake_socket]
 
-        if len(self._sockets) < 1 and self._poll_future is not None:
+        if self._poll_future is not None:
             self._poll_future.cancel()
             self._poll_future = None
+
+        if len(self._sockets) > 0:
+            self._poll_future = asyncio.async(self._poll_sockets(), loop=self._loop)
 
     @asyncio.coroutine
     def _get_socket_events(self):
@@ -116,6 +119,10 @@ class AsyncPoller(metaclass=Singleton):
         try:
             while events:
                 socket, event = events[0]
+                if socket not in self._sockets:
+                    events = self._poller.poll(0)
+                    continue
+
                 aio_socket = self._sockets[socket]
                 yield from aio_socket.handle_event(socket, event)
 
@@ -129,7 +136,7 @@ class AsyncPoller(metaclass=Singleton):
 
         # Restart polling
         if len(self._sockets) > 0 and self._poll_future is not None:
-            asyncio.async(self._poll_sockets(), loop=self._loop)
+            self._poll_future = asyncio.async(self._poll_sockets(), loop=self._loop)
 
 
 class AIOZMQSocket:
